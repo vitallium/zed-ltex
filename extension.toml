@@ -1,0 +1,11 @@
+id = "ltex"
+name = "ltex"
+description = "LTEX Language Server support for Zed editor"
+version = "0.0.1"
+schema_version = 1
+authors = ["Vitaly Slobodin <vitaliy.slobodin@gmail.com>"]
+repository = "https://github.com/vitallium/zed-ltex"
+
+[language_servers.ltex]
+name = "LTeX"
+languages = ["LaTeX", "Markdown", "Plain Text", "reST", "Git Commit", "HTML"]
