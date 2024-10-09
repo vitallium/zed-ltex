@@ -14,8 +14,6 @@ struct LtexExtension {
 }
 
 impl LtexExtension {
-    pub const LANGUAGE_SERVER_ID: &'static str = "ltex";
-
     fn language_server_binary(
         &mut self,
         language_server_id: &LanguageServerId,
