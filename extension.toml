@@ -8,4 +8,12 @@ repository = "https://github.com/vitallium/zed-ltex"
 
 [language_servers.ltex]
 name = "LTeX"
-languages = ["LaTeX", "Markdown", "Plain Text", "reST", "Git Commit", "HTML"]
+languages = [
+    "LaTeX",
+    "Markdown",
+    "Plain Text",
+    "reST",
+    "Git Commit",
+    "HTML",
+    "Typst",
+]
