@@ -1,10 +1,10 @@
-# LTeX Language Server
+# LTeX+ Language Server
 
-[LTEX Language Server](https://github.com/valentjn/ltex-ls) support for Zed editor
+[LTEX+ Language Server](https://ltex-plus.github.io/ltex-plus/) support for Zed editor.
 
 ## Configuration
 
-See the [LTeX Language Server documentation](https://valentjn.github.io/ltex/settings.html) for more information on how to configure the LTeX Language Server.
+See the [LTeX+ Language Server documentation](https://ltex-plus.github.io/ltex-plus/settings.html) for more information on how to configure the LTeX+ Language Server.
 
 ### Changing the language
 

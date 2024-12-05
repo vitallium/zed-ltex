@@ -19,7 +19,7 @@ impl LtexExtension {
         language_server_id: &LanguageServerId,
         worktree: &zed::Worktree,
     ) -> Result<LtexBinary> {
-        if let Some(path) = worktree.which("ltex-ls") {
+        if let Some(path) = worktree.which("ltex-ls-plus") {
             return Ok(LtexBinary {
                 path,
                 args: Some(vec![]),
@@ -40,23 +40,31 @@ impl LtexExtension {
             &zed::LanguageServerInstallationStatus::CheckingForUpdate,
         );
         let release = zed::latest_github_release(
-            "valentjn/ltex-ls",
+            "ltex-plus/ltex-ls-plus",
             zed::GithubReleaseOptions {
                 require_assets: true,
                 pre_release: false,
             },
         )?;
 
-        let (platform, _arch) = zed::current_platform();
+        let (platform, arch) = zed::current_platform();
         let version = release.version;
 
         let asset_stem = format!(
-            "ltex-ls-{version}-{os}-x64",
+            "ltex-ls-plus-{version}-{os}-{arch}",
             version = version,
             os = match platform {
                 zed::Os::Mac => "mac",
                 zed::Os::Linux => "linux",
                 zed::Os::Windows => "windows",
+            },
+            arch = match arch {
+                zed::Architecture::Aarch64 => "aarch64",
+                zed::Architecture::X8664 => "x64",
+                zed::Architecture::X86 =>
+                    return Err(
+                        "The requested architecture x86 is not supported by `ltex-ls-plus`.".into()
+                    ),
             }
         );
         let asset_name = format!(
@@ -73,8 +81,8 @@ impl LtexExtension {
             .find(|asset| asset.name == asset_name)
             .ok_or_else(|| format!("no asset found matching {:?}", asset_name))?;
 
-        let version_dir = format!("ltex-{}", version);
-        let binary_path = format!("{version_dir}/ltex-ls-{version}/bin/ltex-ls");
+        let version_dir = format!("ltex-ls-plus-{}", version);
+        let binary_path = format!("{version_dir}/{version_dir}/bin/ltex-ls-plus");
 
         if !fs::metadata(&binary_path).map_or(false, |stat| stat.is_file()) {
             zed::set_language_server_installation_status(
