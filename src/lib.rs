@@ -19,18 +19,27 @@ impl LtexExtension {
         language_server_id: &LanguageServerId,
         worktree: &zed::Worktree,
     ) -> Result<LtexBinary> {
+        let lsp_settings = LspSettings::for_worktree(language_server_id.as_ref(), worktree)?;
+
+        match lsp_settings.binary {
+            Some(binary_settings) if binary_settings.path.is_some() => {
+                return Ok(LtexBinary {
+                    path: binary_settings.path.unwrap(),
+                    args: binary_settings.arguments,
+                });
+            }
+            _ => {}
+        }
+
         if let Some(path) = worktree.which("ltex-ls-plus") {
-            return Ok(LtexBinary {
-                path,
-                args: Some(vec![]),
-            });
+            return Ok(LtexBinary { path, args: None });
         }
 
         if let Some(path) = &self.cached_binary_path {
             if fs::metadata(path).map_or(false, |stat| stat.is_file()) {
                 return Ok(LtexBinary {
                     path: path.clone(),
-                    args: Some(vec![]),
+                    args: None,
                 });
             }
         }
