@@ -4,13 +4,14 @@ use zed_extension_api::{
     self as zed, settings::LspSettings, Command, LanguageServerId, Result, Worktree,
 };
 
+#[derive(Clone)]
 struct LtexBinary {
     path: String,
     args: Option<Vec<String>>,
 }
 
 struct LtexExtension {
-    cached_binary_path: Option<String>,
+    cached_binary: Option<LtexBinary>,
 }
 
 impl LtexExtension {
@@ -19,31 +20,38 @@ impl LtexExtension {
         language_server_id: &LanguageServerId,
         worktree: &zed::Worktree,
     ) -> Result<LtexBinary> {
+        if let Some(cached_binary) = &self.cached_binary {
+            if fs::metadata(&cached_binary.path).map_or(false, |stat| stat.is_file()) {
+                return Ok(cached_binary.clone());
+            }
+        }
+
         let lsp_settings = LspSettings::for_worktree(language_server_id.as_ref(), worktree)?;
 
-        match lsp_settings.binary {
-            Some(binary_settings) if binary_settings.path.is_some() => {
-                return Ok(LtexBinary {
-                    path: binary_settings.path.unwrap(),
-                    args: binary_settings.arguments,
-                });
+        if let Some(binary_settings) = lsp_settings.binary.as_ref() {
+            if let Some(path) = &binary_settings.path {
+                let binary = LtexBinary {
+                    path: path.clone(),
+                    args: binary_settings.arguments.clone(),
+                };
+                self.cached_binary = Some(binary.clone());
+                return Ok(binary);
             }
-            _ => {}
         }
 
         if let Some(path) = worktree.which("ltex-ls-plus") {
-            return Ok(LtexBinary { path, args: None });
+            let binary = LtexBinary { path, args: None };
+            self.cached_binary = Some(binary.clone());
+            return Ok(binary);
         }
 
-        if let Some(path) = &self.cached_binary_path {
-            if fs::metadata(path).map_or(false, |stat| stat.is_file()) {
-                return Ok(LtexBinary {
-                    path: path.clone(),
-                    args: None,
-                });
-            }
-        }
+        self.download_language_server(language_server_id)
+    }
 
+    fn download_language_server(
+        &mut self,
+        language_server_id: &LanguageServerId,
+    ) -> Result<LtexBinary> {
         zed::set_language_server_installation_status(
             language_server_id,
             &zed::LanguageServerInstallationStatus::CheckingForUpdate,
@@ -115,18 +123,19 @@ impl LtexExtension {
             }
         }
 
-        self.cached_binary_path = Some(binary_path.clone());
-        Ok(LtexBinary {
+        let binary = LtexBinary {
             path: binary_path,
             args: Some(vec![]),
-        })
+        };
+        self.cached_binary = Some(binary.clone());
+        Ok(binary)
     }
 }
 
 impl zed::Extension for LtexExtension {
     fn new() -> Self {
         Self {
-            cached_binary_path: None,
+            cached_binary: None,
         }
     }
 
@@ -139,7 +148,7 @@ impl zed::Extension for LtexExtension {
 
         Ok(zed::Command {
             command: ltex_binary.path,
-            args: ltex_binary.args.unwrap(),
+            args: ltex_binary.args.unwrap_or_default(),
             env: Default::default(),
         })
     }
