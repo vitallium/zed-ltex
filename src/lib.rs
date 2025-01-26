@@ -146,10 +146,16 @@ impl zed::Extension for LtexExtension {
     ) -> Result<Command> {
         let ltex_binary = self.language_server_binary(language_server_id, worktree)?;
 
+        let env = worktree
+            .shell_env()
+            .into_iter()
+            .filter(|(key, _)| key != "JAVA_HOME")
+            .collect();
+
         Ok(zed::Command {
             command: ltex_binary.path,
             args: ltex_binary.args.unwrap_or_default(),
-            env: Default::default(),
+            env,
         })
     }
 
