@@ -96,9 +96,9 @@ impl LtexExtension {
             .assets
             .iter()
             .find(|asset| asset.name == asset_name)
-            .ok_or_else(|| format!("no asset found matching {:?}", asset_name))?;
+            .ok_or_else(|| format!("no asset found matching {asset_name}"))?;
 
-        let version_dir = format!("ltex-ls-plus-{}", version);
+        let version_dir = format!("ltex-ls-plus-{version}");
         let binary_path = format!("{version_dir}/{version_dir}/bin/ltex-ls-plus");
 
         if !fs::metadata(&binary_path).is_ok_and(|stat| stat.is_file()) {
