@@ -99,7 +99,11 @@ impl LtexExtension {
             .ok_or_else(|| format!("no asset found matching {asset_name}"))?;
 
         let version_dir = format!("ltex-ls-plus-{version}");
-        let binary_path = format!("{version_dir}/{version_dir}/bin/ltex-ls-plus");
+        let binary_name = match platform {
+            zed::Os::Windows => "ltex-ls-plus.bat",
+            _ => "ltex-ls-plus",
+        };
+        let binary_path = format!("{version_dir}/{version_dir}/bin/{binary_name}");
 
         if !fs::metadata(&binary_path).is_ok_and(|stat| stat.is_file()) {
             zed::set_language_server_installation_status(
