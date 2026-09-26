@@ -52,19 +52,27 @@ impl LtexExtension {
         &mut self,
         language_server_id: &LanguageServerId,
     ) -> Result<LtexBinary> {
+        let (platform, arch) = zed::current_platform();
         zed::set_language_server_installation_status(
             language_server_id,
             &zed::LanguageServerInstallationStatus::CheckingForUpdate,
         );
-        let release = zed::latest_github_release(
+        let release = match zed::latest_github_release(
             "ltex-plus/ltex-ls-plus",
             zed::GithubReleaseOptions {
                 require_assets: true,
                 pre_release: false,
             },
-        )?;
-
-        let (platform, arch) = zed::current_platform();
+        ) {
+            Ok(release) => release,
+            Err(error) => {
+                if let Some(binary) = self.find_downloaded_binary(platform) {
+                    self.cached_binary = Some(binary.clone());
+                    return Ok(binary);
+                }
+                return Err(error);
+            }
+        };
         let version = release.version;
 
         let asset_stem = format!(
@@ -133,6 +141,39 @@ impl LtexExtension {
         };
         self.cached_binary = Some(binary.clone());
         Ok(binary)
+    }
+
+    fn find_downloaded_binary(&self, platform: zed::Os) -> Option<LtexBinary> {
+        let binary_name = match platform {
+            zed::Os::Windows => "ltex-ls-plus.bat",
+            _ => "ltex-ls-plus",
+        };
+        let prefix = "ltex-ls-plus-";
+        let mut version_dirs = fs::read_dir(".")
+            .ok()?
+            .filter_map(|entry| {
+                let entry = entry.ok()?;
+                let name = entry.file_name().into_string().ok()?;
+                let version = name
+                    .strip_prefix(prefix)?
+                    .split('.')
+                    .map(str::parse::<u32>)
+                    .collect::<Result<Vec<_>, _>>()
+                    .ok()?;
+                entry.file_type().ok()?.is_dir().then_some((version, name))
+            })
+            .collect::<Vec<_>>();
+        version_dirs.sort_unstable_by(|a, b| b.cmp(a));
+
+        version_dirs.into_iter().find_map(|(_, version_dir)| {
+            let path = format!("{version_dir}/{version_dir}/bin/{binary_name}");
+            fs::metadata(&path)
+                .is_ok_and(|stat| stat.is_file())
+                .then_some(LtexBinary {
+                    path,
+                    args: Some(vec![]),
+                })
+        })
     }
 }
 
