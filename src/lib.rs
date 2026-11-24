@@ -1,4 +1,4 @@
-use std::fs;
+use std::{fs, path::Path};
 
 use zed_extension_api::{
     self as zed,
@@ -66,100 +66,143 @@ impl LtexExtension {
             language_server_id,
             &zed::LanguageServerInstallationStatus::CheckingForUpdate,
         );
-        let release = match zed::latest_github_release(
-            "ltex-plus/ltex-ls-plus",
-            zed::GithubReleaseOptions {
-                require_assets: true,
-                pre_release: false,
+        self.download_language_server_with(
+            platform,
+            arch,
+            Path::new("."),
+            || {
+                let release = zed::latest_github_release(
+                    "ltex-plus/ltex-ls-plus",
+                    zed::GithubReleaseOptions {
+                        require_assets: true,
+                        pre_release: false,
+                    },
+                )?;
+                Ok((
+                    release.version,
+                    release
+                        .assets
+                        .into_iter()
+                        .map(|asset| (asset.name, asset.download_url))
+                        .collect(),
+                ))
             },
-        ) {
-            Ok(release) => release,
-            Err(error) => {
-                if let Some(binary) = self.find_downloaded_binary(platform) {
-                    self.cached_binary = Some(binary.clone());
-                    return Ok(binary);
+            |url, version_dir, file_kind| {
+                zed::set_language_server_installation_status(
+                    language_server_id,
+                    &zed::LanguageServerInstallationStatus::Downloading,
+                );
+                zed::download_file(url, version_dir, file_kind)
+                    .map_err(|e| format!("failed to download file: {e}"))
+            },
+        )
+    }
+
+    fn download_language_server_with(
+        &mut self,
+        platform: zed::Os,
+        arch: zed::Architecture,
+        root: &Path,
+        fetch_release: impl FnOnce() -> Result<(String, Vec<(String, String)>)>,
+        download: impl FnOnce(&str, &str, zed::DownloadedFileType) -> Result<()>,
+    ) -> Result<LtexBinary> {
+        let update = (|| {
+            let (version, assets) = fetch_release()?;
+            let asset_stem = format!(
+                "ltex-ls-plus-{version}-{os}-{arch}",
+                os = match platform {
+                    zed::Os::Mac => "mac",
+                    zed::Os::Linux => "linux",
+                    zed::Os::Windows => "windows",
+                },
+                arch = match arch {
+                    zed::Architecture::Aarch64 => "aarch64",
+                    zed::Architecture::X8664 => "x64",
+                    zed::Architecture::X86 =>
+                        return Err(
+                            "The requested architecture x86 is not supported by `ltex-ls-plus`."
+                                .into(),
+                        ),
                 }
-                return Err(error);
-            }
-        };
-        let version = release.version;
-
-        let asset_stem = format!(
-            "ltex-ls-plus-{version}-{os}-{arch}",
-            version = version,
-            os = match platform {
-                zed::Os::Mac => "mac",
-                zed::Os::Linux => "linux",
-                zed::Os::Windows => "windows",
-            },
-            arch = match arch {
-                zed::Architecture::Aarch64 => "aarch64",
-                zed::Architecture::X8664 => "x64",
-                zed::Architecture::X86 =>
-                    return Err(
-                        "The requested architecture x86 is not supported by `ltex-ls-plus`.".into()
-                    ),
-            }
-        );
-        let asset_name = format!(
-            "{asset_stem}.{suffix}",
-            suffix = match platform {
-                zed::Os::Windows => "zip",
-                _ => "tar.gz",
-            }
-        );
-
-        let asset = release
-            .assets
-            .iter()
-            .find(|asset| asset.name == asset_name)
-            .ok_or_else(|| format!("no asset found matching {asset_name}"))?;
-
-        let version_dir = format!("ltex-ls-plus-{version}");
-        let binary_name = match platform {
-            zed::Os::Windows => "ltex-ls-plus.bat",
-            _ => "ltex-ls-plus",
-        };
-        let binary_path = format!("{version_dir}/{version_dir}/bin/{binary_name}");
-
-        if !fs::metadata(&binary_path).is_ok_and(|stat| stat.is_file()) {
-            zed::set_language_server_installation_status(
-                language_server_id,
-                &zed::LanguageServerInstallationStatus::Downloading,
             );
-            let file_kind = match platform {
-                zed::Os::Windows => zed::DownloadedFileType::Zip,
-                _ => zed::DownloadedFileType::GzipTar,
-            };
-            zed::download_file(&asset.download_url, &version_dir, file_kind)
-                .map_err(|e| format!("failed to download file: {e}"))?;
+            let asset_name = format!(
+                "{asset_stem}.{suffix}",
+                suffix = match platform {
+                    zed::Os::Windows => "zip",
+                    _ => "tar.gz",
+                }
+            );
+            let download_url = assets
+                .iter()
+                .find(|(name, _)| name == &asset_name)
+                .map(|(_, url)| url)
+                .ok_or_else(|| format!("no asset found matching {asset_name}"))?;
 
-            let entries =
-                fs::read_dir(".").map_err(|e| format!("failed to list working directory {e}"))?;
-            for entry in entries {
-                let entry = entry.map_err(|e| format!("failed to load directory entry {e}"))?;
-                if entry.file_name().to_str() != Some(&version_dir) {
-                    fs::remove_dir_all(entry.path()).ok();
+            let version_dir = format!("ltex-ls-plus-{version}");
+            let binary_name = match platform {
+                zed::Os::Windows => "ltex-ls-plus.bat",
+                _ => "ltex-ls-plus",
+            };
+            let binary_path = root
+                .join(&version_dir)
+                .join(&version_dir)
+                .join("bin")
+                .join(binary_name);
+
+            if !fs::metadata(&binary_path).is_ok_and(|stat| stat.is_file()) {
+                let file_kind = match platform {
+                    zed::Os::Windows => zed::DownloadedFileType::Zip,
+                    _ => zed::DownloadedFileType::GzipTar,
+                };
+                download(download_url, &version_dir, file_kind)?;
+
+                if !fs::metadata(&binary_path).is_ok_and(|stat| stat.is_file()) {
+                    return Err(format!(
+                        "downloaded archive did not contain expected executable {}",
+                        binary_path.display()
+                    ));
+                }
+
+                let entries = fs::read_dir(root)
+                    .map_err(|e| format!("failed to list working directory {e}"))?;
+                for entry in entries {
+                    let entry = entry.map_err(|e| format!("failed to load directory entry {e}"))?;
+                    if entry.file_name().to_str() != Some(&version_dir) {
+                        fs::remove_dir_all(entry.path()).ok();
+                    }
+                }
+            }
+
+            Ok(LtexBinary {
+                path: binary_path.to_string_lossy().into_owned(),
+                args: Some(vec![]),
+                use_bundled_java: true,
+            })
+        })();
+
+        match update {
+            Ok(binary) => {
+                self.cached_binary = Some(binary.clone());
+                Ok(binary)
+            }
+            Err(error) => {
+                if let Some(binary) = self.find_downloaded_binary_in(platform, root) {
+                    self.cached_binary = Some(binary.clone());
+                    Ok(binary)
+                } else {
+                    Err(error)
                 }
             }
         }
-
-        let binary = LtexBinary {
-            path: binary_path,
-            args: Some(vec![]),
-            use_bundled_java: true,
-        };
-        self.cached_binary = Some(binary.clone());
-        Ok(binary)
     }
 
-    fn find_downloaded_binary(&self, platform: zed::Os) -> Option<LtexBinary> {
+    fn find_downloaded_binary_in(&self, platform: zed::Os, root: &Path) -> Option<LtexBinary> {
         let binary_name = match platform {
             zed::Os::Windows => "ltex-ls-plus.bat",
             _ => "ltex-ls-plus",
         };
         let prefix = "ltex-ls-plus-";
-        let mut version_dirs = fs::read_dir(".")
+        let mut version_dirs = fs::read_dir(root)
             .ok()?
             .filter_map(|entry| {
                 let entry = entry.ok()?;
@@ -176,11 +219,15 @@ impl LtexExtension {
         version_dirs.sort_unstable_by(|a, b| b.cmp(a));
 
         version_dirs.into_iter().find_map(|(_, version_dir)| {
-            let path = format!("{version_dir}/{version_dir}/bin/{binary_name}");
+            let path = root
+                .join(&version_dir)
+                .join(&version_dir)
+                .join("bin")
+                .join(binary_name);
             fs::metadata(&path)
                 .is_ok_and(|stat| stat.is_file())
                 .then_some(LtexBinary {
-                    path,
+                    path: path.to_string_lossy().into_owned(),
                     args: Some(vec![]),
                     use_bundled_java: true,
                 })
@@ -282,9 +329,68 @@ zed::register_extension!(LtexExtension);
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
+    use std::{
+        collections::HashMap,
+        path::{Path, PathBuf},
+        sync::atomic::{AtomicUsize, Ordering},
+    };
 
     use super::*;
+
+    static NEXT_TEMP_DIR: AtomicUsize = AtomicUsize::new(0);
+
+    struct TempDir(PathBuf);
+
+    impl TempDir {
+        fn new() -> Self {
+            let path = std::env::temp_dir().join(format!(
+                "zed-ltex-test-{}-{}",
+                std::process::id(),
+                NEXT_TEMP_DIR.fetch_add(1, Ordering::Relaxed)
+            ));
+            fs::create_dir(&path).unwrap();
+            Self(path)
+        }
+    }
+
+    impl AsRef<Path> for TempDir {
+        fn as_ref(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            fs::remove_dir_all(&self.0).unwrap();
+        }
+    }
+
+    fn installed_binary(root: &Path, version: &str) -> PathBuf {
+        let version_dir = format!("ltex-ls-plus-{version}");
+        let path = root
+            .join(&version_dir)
+            .join(&version_dir)
+            .join("bin/ltex-ls-plus");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, "executable").unwrap();
+        path
+    }
+
+    fn linux_release(version: &str) -> (String, Vec<(String, String)>) {
+        (
+            version.into(),
+            vec![(
+                format!("ltex-ls-plus-{version}-linux-x64.tar.gz"),
+                "https://example.com/ltex.tar.gz".into(),
+            )],
+        )
+    }
+
+    fn extension() -> LtexExtension {
+        LtexExtension {
+            cached_binary: None,
+        }
+    }
 
     fn host_environment(
         shell_env: &[(&str, &str)],
@@ -302,6 +408,131 @@ mod tests {
                 .map(|(key, value)| (key.to_string(), value.to_string())),
         );
         env
+    }
+
+    #[test]
+    fn metadata_failure_uses_complete_downloaded_binary() {
+        let root = TempDir::new();
+        let installed = installed_binary(root.as_ref(), "1.0.0");
+        let mut extension = extension();
+
+        let binary = extension
+            .download_language_server_with(
+                zed::Os::Linux,
+                zed::Architecture::X8664,
+                root.as_ref(),
+                || Err("metadata unavailable".into()),
+                |_, _, _| panic!("download must not run"),
+            )
+            .unwrap();
+
+        assert_eq!(binary.path, installed.to_string_lossy());
+        assert!(binary.use_bundled_java);
+    }
+
+    #[test]
+    fn missing_asset_uses_complete_downloaded_binary() {
+        let root = TempDir::new();
+        let installed = installed_binary(root.as_ref(), "1.0.0");
+        let mut extension = extension();
+
+        let binary = extension
+            .download_language_server_with(
+                zed::Os::Linux,
+                zed::Architecture::X8664,
+                root.as_ref(),
+                || Ok(("2.0.0".into(), vec![])),
+                |_, _, _| panic!("download must not run"),
+            )
+            .unwrap();
+
+        assert_eq!(binary.path, installed.to_string_lossy());
+    }
+
+    #[test]
+    fn download_failure_uses_complete_downloaded_binary() {
+        let root = TempDir::new();
+        let installed = installed_binary(root.as_ref(), "1.0.0");
+        let mut extension = extension();
+
+        let binary = extension
+            .download_language_server_with(
+                zed::Os::Linux,
+                zed::Architecture::X8664,
+                root.as_ref(),
+                || Ok(linux_release("2.0.0")),
+                |_, _, _| Err("archive unavailable".into()),
+            )
+            .unwrap();
+
+        assert_eq!(binary.path, installed.to_string_lossy());
+    }
+
+    #[test]
+    fn successful_update_wins_and_removes_old_install() {
+        let root = TempDir::new();
+        let old = installed_binary(root.as_ref(), "1.0.0");
+        let expected = root
+            .as_ref()
+            .join("ltex-ls-plus-2.0.0/ltex-ls-plus-2.0.0/bin/ltex-ls-plus");
+        let mut extension = extension();
+
+        let binary = extension
+            .download_language_server_with(
+                zed::Os::Linux,
+                zed::Architecture::X8664,
+                root.as_ref(),
+                || Ok(linux_release("2.0.0")),
+                |_, _, _| {
+                    installed_binary(root.as_ref(), "2.0.0");
+                    Ok(())
+                },
+            )
+            .unwrap();
+
+        assert_eq!(binary.path, expected.to_string_lossy());
+        assert!(expected.is_file());
+        assert!(!old.exists());
+    }
+
+    #[test]
+    fn update_error_without_complete_install_returns_original_error() {
+        let root = TempDir::new();
+        let mut extension = extension();
+
+        let result = extension.download_language_server_with(
+            zed::Os::Linux,
+            zed::Architecture::X8664,
+            root.as_ref(),
+            || Ok(linux_release("2.0.0")),
+            |_, _, _| Err("original download error".into()),
+        );
+
+        assert_eq!(result.err().as_deref(), Some("original download error"));
+    }
+
+    #[test]
+    fn incomplete_update_keeps_complete_older_install_for_fallback() {
+        let root = TempDir::new();
+        let installed = installed_binary(root.as_ref(), "1.0.0");
+        let mut extension = extension();
+
+        let binary = extension
+            .download_language_server_with(
+                zed::Os::Linux,
+                zed::Architecture::X8664,
+                root.as_ref(),
+                || Ok(linux_release("2.0.0")),
+                |_, _, _| {
+                    fs::create_dir(root.as_ref().join("ltex-ls-plus-2.0.0"))
+                        .map_err(|error| error.to_string())?;
+                    Ok(())
+                },
+            )
+            .unwrap();
+
+        assert_eq!(binary.path, installed.to_string_lossy());
+        assert!(installed.is_file());
     }
 
     #[test]
