@@ -1,7 +1,10 @@
 use std::fs;
 
 use zed_extension_api::{
-    self as zed, settings::LspSettings, Command, LanguageServerId, Result, Worktree,
+    self as zed,
+    serde_json::{json, Value},
+    settings::LspSettings,
+    Command, LanguageServerId, Result, Worktree,
 };
 
 #[derive(Clone)]
@@ -209,11 +212,12 @@ impl zed::Extension for LtexExtension {
         server_id: &LanguageServerId,
         worktree: &zed_extension_api::Worktree,
     ) -> Result<Option<zed_extension_api::serde_json::Value>> {
-        let settings = LspSettings::for_worktree(server_id.as_ref(), worktree)
+        let mut options = LspSettings::for_worktree(server_id.as_ref(), worktree)
             .ok()
             .and_then(|lsp_settings| lsp_settings.initialization_options.clone())
             .unwrap_or_default();
-        Ok(Some(settings))
+        default_to_server_managed_external_files(&mut options);
+        Ok(Some(options))
     }
 
     fn language_server_workspace_configuration(
@@ -229,4 +233,60 @@ impl zed::Extension for LtexExtension {
     }
 }
 
+/// Sets `ltex.externalFiles.managedByEditor` to `false` unless the user set it.
+///
+/// "Add to dictionary", "Disable rule" and "Hide false positive" write to files.
+/// Zed cannot run extension code when the user picks a code action, so the
+/// extension cannot write these files. With this option, LTeX+ LS (19.0.0 or
+/// later) reads and writes them itself. Older servers ignore the option.
+fn default_to_server_managed_external_files(options: &mut Value) {
+    if options.is_null() {
+        *options = json!({});
+    }
+    let Some(external_files) = options
+        .as_object_mut()
+        .and_then(|root| {
+            root.entry("ltex")
+                .or_insert_with(|| json!({}))
+                .as_object_mut()
+        })
+        .and_then(|ltex| {
+            ltex.entry("externalFiles")
+                .or_insert_with(|| json!({}))
+                .as_object_mut()
+        })
+    else {
+        return;
+    };
+    external_files
+        .entry("managedByEditor")
+        .or_insert(Value::Bool(false));
+}
+
 zed::register_extension!(LtexExtension);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn adds_the_default_when_nothing_is_set() {
+        let mut options = Value::Null;
+        default_to_server_managed_external_files(&mut options);
+        assert_eq!(
+            options,
+            json!({"ltex": {"externalFiles": {"managedByEditor": false}}})
+        );
+    }
+
+    #[test]
+    fn keeps_the_users_value_and_other_options() {
+        let mut options =
+            json!({"locale": "de", "ltex": {"externalFiles": {"managedByEditor": true}}});
+        default_to_server_managed_external_files(&mut options);
+        assert_eq!(
+            options,
+            json!({"locale": "de", "ltex": {"externalFiles": {"managedByEditor": true}}})
+        );
+    }
+}
