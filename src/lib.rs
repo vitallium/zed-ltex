@@ -11,6 +11,7 @@ use zed_extension_api::{
 struct LtexBinary {
     path: String,
     args: Option<Vec<String>>,
+    use_bundled_java: bool,
 }
 
 struct LtexExtension {
@@ -36,6 +37,7 @@ impl LtexExtension {
                 let binary = LtexBinary {
                     path: path.clone(),
                     args: binary_settings.arguments.clone(),
+                    use_bundled_java: false,
                 };
                 self.cached_binary = Some(binary.clone());
                 return Ok(binary);
@@ -43,7 +45,11 @@ impl LtexExtension {
         }
 
         if let Some(path) = worktree.which("ltex-ls-plus") {
-            let binary = LtexBinary { path, args: None };
+            let binary = LtexBinary {
+                path,
+                args: None,
+                use_bundled_java: false,
+            };
             self.cached_binary = Some(binary.clone());
             return Ok(binary);
         }
@@ -141,6 +147,7 @@ impl LtexExtension {
         let binary = LtexBinary {
             path: binary_path,
             args: Some(vec![]),
+            use_bundled_java: true,
         };
         self.cached_binary = Some(binary.clone());
         Ok(binary)
@@ -175,9 +182,21 @@ impl LtexExtension {
                 .then_some(LtexBinary {
                     path,
                     args: Some(vec![]),
+                    use_bundled_java: true,
                 })
         })
     }
+}
+
+fn language_server_environment(
+    mut shell_env: Vec<(String, String)>,
+    use_bundled_java: bool,
+) -> Vec<(String, String)> {
+    if use_bundled_java {
+        shell_env.retain(|(key, _)| key != "JAVA_HOME");
+        shell_env.push(("JAVA_HOME".into(), String::new()));
+    }
+    shell_env
 }
 
 impl zed::Extension for LtexExtension {
@@ -194,11 +213,7 @@ impl zed::Extension for LtexExtension {
     ) -> Result<Command> {
         let ltex_binary = self.language_server_binary(language_server_id, worktree)?;
 
-        let env = worktree
-            .shell_env()
-            .into_iter()
-            .filter(|(key, _)| key != "JAVA_HOME")
-            .collect();
+        let env = language_server_environment(worktree.shell_env(), ltex_binary.use_bundled_java);
 
         Ok(zed::Command {
             command: ltex_binary.path,
@@ -267,7 +282,83 @@ zed::register_extension!(LtexExtension);
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
     use super::*;
+
+    fn host_environment(
+        shell_env: &[(&str, &str)],
+        command_env: Vec<(String, String)>,
+        explicit_env: &[(&str, &str)],
+    ) -> HashMap<String, String> {
+        let mut env = shell_env
+            .iter()
+            .map(|(key, value)| (key.to_string(), value.to_string()))
+            .collect::<HashMap<_, _>>();
+        env.extend(command_env);
+        env.extend(
+            explicit_env
+                .iter()
+                .map(|(key, value)| (key.to_string(), value.to_string())),
+        );
+        env
+    }
+
+    #[test]
+    fn bundled_binary_forces_its_java_and_preserves_other_environment() {
+        let shell_env = [("JAVA_HOME", "/system/java"), ("PATH", "/usr/bin")];
+        let command_env = language_server_environment(
+            shell_env
+                .iter()
+                .map(|(key, value)| (key.to_string(), value.to_string()))
+                .collect(),
+            true,
+        );
+
+        let env = host_environment(&shell_env, command_env, &[]);
+
+        assert_eq!(env.get("JAVA_HOME").map(String::as_str), Some(""));
+        assert_eq!(env.get("PATH").map(String::as_str), Some("/usr/bin"));
+    }
+
+    #[test]
+    fn local_or_custom_binary_preserves_java_home() {
+        let shell_env = [("JAVA_HOME", "/system/java"), ("PATH", "/usr/bin")];
+        let command_env = language_server_environment(
+            shell_env
+                .iter()
+                .map(|(key, value)| (key.to_string(), value.to_string()))
+                .collect(),
+            false,
+        );
+
+        let env = host_environment(&shell_env, command_env, &[]);
+
+        assert_eq!(
+            env.get("JAVA_HOME").map(String::as_str),
+            Some("/system/java")
+        );
+        assert_eq!(env.get("PATH").map(String::as_str), Some("/usr/bin"));
+    }
+
+    #[test]
+    fn explicit_host_override_wins_for_bundled_binary() {
+        let shell_env = [("JAVA_HOME", "/system/java")];
+        let command_env = language_server_environment(
+            shell_env
+                .iter()
+                .map(|(key, value)| (key.to_string(), value.to_string()))
+                .collect(),
+            true,
+        );
+
+        let env = host_environment(&shell_env, command_env, &[("JAVA_HOME", "/chosen/java")]);
+
+        assert_eq!(
+            env.get("JAVA_HOME").map(String::as_str),
+            Some("/chosen/java")
+        );
+    }
 
     #[test]
     fn adds_the_default_when_nothing_is_set() {
