@@ -15,7 +15,7 @@ struct LtexBinary {
 }
 
 struct LtexExtension {
-    cached_binary: Option<LtexBinary>,
+    cached_downloaded_binary: Option<LtexBinary>,
 }
 
 struct DownloadSpec {
@@ -58,37 +58,46 @@ impl LtexExtension {
         language_server_id: &LanguageServerId,
         worktree: &zed::Worktree,
     ) -> Result<LtexBinary> {
-        if let Some(cached_binary) = &self.cached_binary {
+        let lsp_settings = LspSettings::for_worktree(language_server_id.as_ref(), worktree)?;
+        let custom_binary = lsp_settings.binary.as_ref().and_then(|settings| {
+            settings.path.as_ref().map(|path| LtexBinary {
+                path: path.clone(),
+                args: settings.arguments.clone(),
+                use_bundled_java: false,
+            })
+        });
+        let local_path = worktree.which("ltex-ls-plus");
+
+        self.select_language_server_binary(custom_binary, local_path, |extension| {
+            extension.download_language_server(language_server_id)
+        })
+    }
+
+    fn select_language_server_binary(
+        &mut self,
+        custom_binary: Option<LtexBinary>,
+        local_path: Option<String>,
+        download: impl FnOnce(&mut Self) -> Result<LtexBinary>,
+    ) -> Result<LtexBinary> {
+        if let Some(binary) = custom_binary {
+            return Ok(binary);
+        }
+        if let Some(path) = local_path {
+            return Ok(LtexBinary {
+                path,
+                args: None,
+                use_bundled_java: false,
+            });
+        }
+        if let Some(cached_binary) = &self.cached_downloaded_binary {
             if fs::metadata(&cached_binary.path).is_ok_and(|stat| stat.is_file()) {
                 return Ok(cached_binary.clone());
             }
         }
 
-        let lsp_settings = LspSettings::for_worktree(language_server_id.as_ref(), worktree)?;
-
-        if let Some(binary_settings) = lsp_settings.binary.as_ref() {
-            if let Some(path) = &binary_settings.path {
-                let binary = LtexBinary {
-                    path: path.clone(),
-                    args: binary_settings.arguments.clone(),
-                    use_bundled_java: false,
-                };
-                self.cached_binary = Some(binary.clone());
-                return Ok(binary);
-            }
-        }
-
-        if let Some(path) = worktree.which("ltex-ls-plus") {
-            let binary = LtexBinary {
-                path,
-                args: None,
-                use_bundled_java: false,
-            };
-            self.cached_binary = Some(binary.clone());
-            return Ok(binary);
-        }
-
-        self.download_language_server(language_server_id)
+        let binary = download(self)?;
+        self.cached_downloaded_binary = Some(binary.clone());
+        Ok(binary)
     }
 
     fn download_language_server(
@@ -214,18 +223,8 @@ impl LtexExtension {
         })();
 
         match update {
-            Ok(binary) => {
-                self.cached_binary = Some(binary.clone());
-                Ok(binary)
-            }
-            Err(error) => {
-                if let Some(binary) = fallback {
-                    self.cached_binary = Some(binary.clone());
-                    Ok(binary)
-                } else {
-                    Err(error)
-                }
-            }
+            Ok(binary) => Ok(binary),
+            Err(error) => fallback.ok_or(error),
         }
     }
 
@@ -282,7 +281,7 @@ fn language_server_environment(
 impl zed::Extension for LtexExtension {
     fn new() -> Self {
         Self {
-            cached_binary: None,
+            cached_downloaded_binary: None,
         }
     }
 
@@ -425,8 +424,14 @@ mod tests {
 
     fn extension() -> LtexExtension {
         LtexExtension {
-            cached_binary: None,
+            cached_downloaded_binary: None,
         }
+    }
+
+    fn selectable_binary(root: &Path, name: &str) -> String {
+        let path = root.join(name);
+        fs::write(&path, "executable").unwrap();
+        path.to_string_lossy().into_owned()
     }
 
     fn host_environment(
@@ -445,6 +450,156 @@ mod tests {
                 .map(|(key, value)| (key.to_string(), value.to_string())),
         );
         env
+    }
+
+    #[test]
+    fn project_local_binary_wins_after_another_project_downloaded_one() {
+        let root = TempDir::new();
+        let downloaded = selectable_binary(root.as_ref(), "downloaded");
+        let local = selectable_binary(root.as_ref(), "local");
+        let mut extension = extension();
+
+        let first = extension
+            .select_language_server_binary(None, None, |_| {
+                Ok(LtexBinary {
+                    path: downloaded.clone(),
+                    args: Some(vec![]),
+                    use_bundled_java: true,
+                })
+            })
+            .unwrap();
+        let second = extension
+            .select_language_server_binary(None, Some(local.clone()), |_| {
+                panic!("download must not run")
+            })
+            .unwrap();
+        let third = extension
+            .select_language_server_binary(None, None, |_| panic!("download must not run"))
+            .unwrap();
+
+        assert_eq!(first.path, downloaded);
+        assert!(first.use_bundled_java);
+        assert_eq!(second.path, local);
+        assert!(!second.use_bundled_java);
+        assert_eq!(third.path, downloaded);
+    }
+
+    #[test]
+    fn valid_downloaded_binary_is_reused() {
+        let root = TempDir::new();
+        let downloaded = selectable_binary(root.as_ref(), "downloaded");
+        let mut extension = extension();
+
+        extension
+            .select_language_server_binary(None, None, |_| {
+                Ok(LtexBinary {
+                    path: downloaded.clone(),
+                    args: Some(vec![]),
+                    use_bundled_java: true,
+                })
+            })
+            .unwrap();
+        let reused = extension
+            .select_language_server_binary(None, None, |_| panic!("download must not run"))
+            .unwrap();
+
+        assert_eq!(reused.path, downloaded);
+        assert!(reused.use_bundled_java);
+    }
+
+    #[test]
+    fn missing_downloaded_cache_is_replaced() {
+        let root = TempDir::new();
+        let missing = selectable_binary(root.as_ref(), "missing");
+        let replacement = selectable_binary(root.as_ref(), "replacement");
+        let mut extension = extension();
+
+        extension
+            .select_language_server_binary(None, None, |_| {
+                Ok(LtexBinary {
+                    path: missing.clone(),
+                    args: Some(vec![]),
+                    use_bundled_java: true,
+                })
+            })
+            .unwrap();
+        fs::remove_file(&missing).unwrap();
+        let selected = extension
+            .select_language_server_binary(None, None, |_| {
+                Ok(LtexBinary {
+                    path: replacement.clone(),
+                    args: Some(vec![]),
+                    use_bundled_java: true,
+                })
+            })
+            .unwrap();
+
+        assert_eq!(selected.path, replacement);
+    }
+
+    #[test]
+    fn custom_binary_has_precedence_and_is_not_cached() {
+        let root = TempDir::new();
+        let custom = selectable_binary(root.as_ref(), "custom");
+        let local = selectable_binary(root.as_ref(), "local");
+        let downloaded = selectable_binary(root.as_ref(), "downloaded");
+        let mut extension = extension();
+
+        extension
+            .select_language_server_binary(None, None, |_| {
+                Ok(LtexBinary {
+                    path: downloaded.clone(),
+                    args: Some(vec![]),
+                    use_bundled_java: true,
+                })
+            })
+            .unwrap();
+        let selected = extension
+            .select_language_server_binary(
+                Some(LtexBinary {
+                    path: custom.clone(),
+                    args: Some(vec!["--custom".into()]),
+                    use_bundled_java: false,
+                }),
+                Some(local),
+                |_| panic!("download must not run"),
+            )
+            .unwrap();
+        let next = extension
+            .select_language_server_binary(None, None, |_| panic!("download must not run"))
+            .unwrap();
+
+        assert_eq!(selected.path, custom);
+        assert_eq!(selected.args, Some(vec!["--custom".into()]));
+        assert!(!selected.use_bundled_java);
+        assert_eq!(next.path, downloaded);
+    }
+
+    #[test]
+    fn project_local_binary_is_not_cached() {
+        let root = TempDir::new();
+        let local = selectable_binary(root.as_ref(), "local");
+        let downloaded = selectable_binary(root.as_ref(), "downloaded");
+        let mut extension = extension();
+
+        let selected = extension
+            .select_language_server_binary(None, Some(local.clone()), |_| {
+                panic!("download must not run")
+            })
+            .unwrap();
+        let next = extension
+            .select_language_server_binary(None, None, |_| {
+                Ok(LtexBinary {
+                    path: downloaded.clone(),
+                    args: Some(vec![]),
+                    use_bundled_java: true,
+                })
+            })
+            .unwrap();
+
+        assert_eq!(selected.path, local);
+        assert!(!selected.use_bundled_java);
+        assert_eq!(next.path, downloaded);
     }
 
     #[test]
