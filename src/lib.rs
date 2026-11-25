@@ -68,8 +68,8 @@ impl LtexExtension {
         });
         let local_path = worktree.which("ltex-ls-plus");
 
-        self.select_language_server_binary(custom_binary, local_path, |extension| {
-            extension.download_language_server(language_server_id)
+        self.select_language_server_binary(custom_binary, local_path, |_| {
+            Self::download_language_server(language_server_id)
         })
     }
 
@@ -100,16 +100,13 @@ impl LtexExtension {
         Ok(binary)
     }
 
-    fn download_language_server(
-        &mut self,
-        language_server_id: &LanguageServerId,
-    ) -> Result<LtexBinary> {
+    fn download_language_server(language_server_id: &LanguageServerId) -> Result<LtexBinary> {
         let (platform, arch) = zed::current_platform();
         zed::set_language_server_installation_status(
             language_server_id,
             &zed::LanguageServerInstallationStatus::CheckingForUpdate,
         );
-        self.download_language_server_with(
+        Self::download_language_server_with(
             platform,
             arch,
             Path::new("."),
@@ -134,14 +131,13 @@ impl LtexExtension {
     }
 
     fn download_language_server_with(
-        &mut self,
         platform: zed::Os,
         arch: zed::Architecture,
         root: &Path,
         fetch_release: impl FnOnce() -> Result<zed::GithubRelease>,
         download: impl FnOnce(&str, &str, zed::DownloadedFileType) -> Result<()>,
     ) -> Result<LtexBinary> {
-        let fallback = self.find_downloaded_binary_in(platform, root);
+        let fallback = Self::find_downloaded_binary_in(platform, root);
         let update = (|| {
             let release = fetch_release()?;
             let version = release.version;
@@ -168,51 +164,9 @@ impl LtexExtension {
                 .join(binary_name);
 
             if !fs::metadata(&binary_path).is_ok_and(|stat| stat.is_file()) {
-                let staging_dir = format!(".{version_dir}.staging");
-                let staging_path = root.join(&staging_dir);
-                let staging_binary_path = staging_path
-                    .join(&version_dir)
-                    .join("bin")
-                    .join(binary_name);
-                if let Err(error) = fs::remove_dir_all(&staging_path) {
-                    if error.kind() != ErrorKind::NotFound {
-                        return Err(format!(
-                            "failed to prepare staging directory {}: {error}",
-                            staging_path.display()
-                        ));
-                    }
-                }
-                download(download_url, &staging_dir, file_kind)?;
-
-                if !fs::metadata(&staging_binary_path).is_ok_and(|stat| stat.is_file()) {
-                    return Err(format!(
-                        "downloaded archive did not contain expected executable {}",
-                        staging_binary_path.display()
-                    ));
-                }
-
-                if install_path.exists() {
-                    fs::remove_dir_all(&install_path).map_err(|error| {
-                        format!(
-                            "failed to replace incomplete installation {}: {error}",
-                            install_path.display()
-                        )
-                    })?;
-                }
-                fs::rename(&staging_path, &install_path).map_err(|error| {
-                    format!(
-                        "failed to publish installation {}: {error}",
-                        install_path.display()
-                    )
-                })?;
-
-                if let Ok(entries) = fs::read_dir(root) {
-                    for entry in entries.flatten() {
-                        if entry.file_name().to_str() != Some(&version_dir) {
-                            fs::remove_dir_all(entry.path()).ok();
-                        }
-                    }
-                }
+                let download_release =
+                    |staging_dir: &str| download(download_url, staging_dir, file_kind);
+                Self::install_release(root, &version_dir, binary_name, download_release)?;
             }
 
             Ok(LtexBinary {
@@ -228,7 +182,60 @@ impl LtexExtension {
         }
     }
 
-    fn find_downloaded_binary_in(&self, platform: zed::Os, root: &Path) -> Option<LtexBinary> {
+    fn install_release(
+        root: &Path,
+        version_dir: &str,
+        binary_name: &str,
+        download: impl FnOnce(&str) -> Result<()>,
+    ) -> Result<()> {
+        let install_path = root.join(version_dir);
+        let staging_dir = format!(".{version_dir}.staging");
+        let staging_path = root.join(&staging_dir);
+        let staging_binary_path = staging_path.join(version_dir).join("bin").join(binary_name);
+        if let Err(error) = fs::remove_dir_all(&staging_path) {
+            if error.kind() != ErrorKind::NotFound {
+                return Err(format!(
+                    "failed to prepare staging directory {}: {error}",
+                    staging_path.display()
+                ));
+            }
+        }
+        download(&staging_dir)?;
+
+        if !fs::metadata(&staging_binary_path).is_ok_and(|stat| stat.is_file()) {
+            return Err(format!(
+                "downloaded archive did not contain expected executable {}",
+                staging_binary_path.display()
+            ));
+        }
+
+        if install_path.exists() {
+            fs::remove_dir_all(&install_path).map_err(|error| {
+                format!(
+                    "failed to replace incomplete installation {}: {error}",
+                    install_path.display()
+                )
+            })?;
+        }
+        fs::rename(&staging_path, &install_path).map_err(|error| {
+            format!(
+                "failed to publish installation {}: {error}",
+                install_path.display()
+            )
+        })?;
+
+        let Ok(entries) = fs::read_dir(root) else {
+            return Ok(());
+        };
+        for entry in entries.flatten() {
+            if entry.file_name().to_str() != Some(version_dir) {
+                fs::remove_dir_all(entry.path()).ok();
+            }
+        }
+        Ok(())
+    }
+
+    fn find_downloaded_binary_in(platform: zed::Os, root: &Path) -> Option<LtexBinary> {
         let binary_name = match platform {
             zed::Os::Windows => "ltex-ls-plus.bat",
             _ => "ltex-ls-plus",
@@ -678,17 +685,15 @@ mod tests {
     fn metadata_failure_uses_complete_downloaded_binary() {
         let root = TempDir::new();
         let installed = installed_binary(root.as_ref(), "1.0.0");
-        let mut extension = extension();
 
-        let binary = extension
-            .download_language_server_with(
-                zed::Os::Linux,
-                zed::Architecture::X8664,
-                root.as_ref(),
-                || Err("metadata unavailable".into()),
-                |_, _, _| panic!("download must not run"),
-            )
-            .unwrap();
+        let binary = LtexExtension::download_language_server_with(
+            zed::Os::Linux,
+            zed::Architecture::X8664,
+            root.as_ref(),
+            || Err("metadata unavailable".into()),
+            |_, _, _| panic!("download must not run"),
+        )
+        .unwrap();
 
         assert_eq!(binary.path, installed.to_string_lossy());
         assert!(binary.use_bundled_java);
@@ -698,22 +703,20 @@ mod tests {
     fn missing_asset_uses_complete_downloaded_binary() {
         let root = TempDir::new();
         let installed = installed_binary(root.as_ref(), "1.0.0");
-        let mut extension = extension();
 
-        let binary = extension
-            .download_language_server_with(
-                zed::Os::Linux,
-                zed::Architecture::X8664,
-                root.as_ref(),
-                || {
-                    Ok(zed::GithubRelease {
-                        version: "2.0.0".into(),
-                        assets: vec![],
-                    })
-                },
-                |_, _, _| panic!("download must not run"),
-            )
-            .unwrap();
+        let binary = LtexExtension::download_language_server_with(
+            zed::Os::Linux,
+            zed::Architecture::X8664,
+            root.as_ref(),
+            || {
+                Ok(zed::GithubRelease {
+                    version: "2.0.0".into(),
+                    assets: vec![],
+                })
+            },
+            |_, _, _| panic!("download must not run"),
+        )
+        .unwrap();
 
         assert_eq!(binary.path, installed.to_string_lossy());
     }
@@ -722,17 +725,15 @@ mod tests {
     fn download_failure_uses_complete_downloaded_binary() {
         let root = TempDir::new();
         let installed = installed_binary(root.as_ref(), "1.0.0");
-        let mut extension = extension();
 
-        let binary = extension
-            .download_language_server_with(
-                zed::Os::Linux,
-                zed::Architecture::X8664,
-                root.as_ref(),
-                || Ok(linux_release("2.0.0")),
-                |_, _, _| Err("archive unavailable".into()),
-            )
-            .unwrap();
+        let binary = LtexExtension::download_language_server_with(
+            zed::Os::Linux,
+            zed::Architecture::X8664,
+            root.as_ref(),
+            || Ok(linux_release("2.0.0")),
+            |_, _, _| Err("archive unavailable".into()),
+        )
+        .unwrap();
 
         assert_eq!(binary.path, installed.to_string_lossy());
     }
@@ -742,20 +743,18 @@ mod tests {
         let root = TempDir::new();
         let installed = installed_binary(root.as_ref(), "1.0.0");
         let staging = root.as_ref().join(".ltex-ls-plus-2.0.0.staging");
-        let mut extension = extension();
 
-        let binary = extension
-            .download_language_server_with(
-                zed::Os::Linux,
-                zed::Architecture::X8664,
-                root.as_ref(),
-                || Ok(linux_release("2.0.0")),
-                |_, destination, _| {
-                    binary_in(root.as_ref(), destination, "2.0.0");
-                    Err("extraction failed".into())
-                },
-            )
-            .unwrap();
+        let binary = LtexExtension::download_language_server_with(
+            zed::Os::Linux,
+            zed::Architecture::X8664,
+            root.as_ref(),
+            || Ok(linux_release("2.0.0")),
+            |_, destination, _| {
+                binary_in(root.as_ref(), destination, "2.0.0");
+                Err("extraction failed".into())
+            },
+        )
+        .unwrap();
 
         assert_eq!(binary.path, installed.to_string_lossy());
         assert!(staging.exists());
@@ -765,9 +764,8 @@ mod tests {
     fn persisted_failed_staging_install_is_not_eligible_on_next_invocation() {
         let root = TempDir::new();
         let staging = root.as_ref().join(".ltex-ls-plus-2.0.0.staging");
-        let mut extension = extension();
 
-        let first = extension.download_language_server_with(
+        let first = LtexExtension::download_language_server_with(
             zed::Os::Linux,
             zed::Architecture::X8664,
             root.as_ref(),
@@ -781,7 +779,7 @@ mod tests {
         assert_eq!(first.err().as_deref(), Some("original extraction error"));
         assert!(staging.exists());
 
-        let second = extension.download_language_server_with(
+        let second = LtexExtension::download_language_server_with(
             zed::Os::Linux,
             zed::Architecture::X8664,
             root.as_ref(),
@@ -800,21 +798,19 @@ mod tests {
             .as_ref()
             .join("ltex-ls-plus-2.0.0/ltex-ls-plus-2.0.0/bin/ltex-ls-plus");
         let staging = root.as_ref().join(".ltex-ls-plus-2.0.0.staging");
-        let mut extension = extension();
 
-        let binary = extension
-            .download_language_server_with(
-                zed::Os::Linux,
-                zed::Architecture::X8664,
-                root.as_ref(),
-                || Ok(linux_release("2.0.0")),
-                |_, destination, _| {
-                    assert_eq!(destination, ".ltex-ls-plus-2.0.0.staging");
-                    binary_in(root.as_ref(), destination, "2.0.0");
-                    Ok(())
-                },
-            )
-            .unwrap();
+        let binary = LtexExtension::download_language_server_with(
+            zed::Os::Linux,
+            zed::Architecture::X8664,
+            root.as_ref(),
+            || Ok(linux_release("2.0.0")),
+            |_, destination, _| {
+                assert_eq!(destination, ".ltex-ls-plus-2.0.0.staging");
+                binary_in(root.as_ref(), destination, "2.0.0");
+                Ok(())
+            },
+        )
+        .unwrap();
 
         assert_eq!(binary.path, expected.to_string_lossy());
         assert!(expected.is_file());
@@ -825,9 +821,8 @@ mod tests {
     #[test]
     fn update_error_without_complete_install_returns_original_error() {
         let root = TempDir::new();
-        let mut extension = extension();
 
-        let result = extension.download_language_server_with(
+        let result = LtexExtension::download_language_server_with(
             zed::Os::Linux,
             zed::Architecture::X8664,
             root.as_ref(),
@@ -842,21 +837,19 @@ mod tests {
     fn incomplete_update_keeps_complete_older_install_for_fallback() {
         let root = TempDir::new();
         let installed = installed_binary(root.as_ref(), "1.0.0");
-        let mut extension = extension();
 
-        let binary = extension
-            .download_language_server_with(
-                zed::Os::Linux,
-                zed::Architecture::X8664,
-                root.as_ref(),
-                || Ok(linux_release("2.0.0")),
-                |_, destination, _| {
-                    fs::create_dir(root.as_ref().join(destination))
-                        .map_err(|error| error.to_string())?;
-                    Ok(())
-                },
-            )
-            .unwrap();
+        let binary = LtexExtension::download_language_server_with(
+            zed::Os::Linux,
+            zed::Architecture::X8664,
+            root.as_ref(),
+            || Ok(linux_release("2.0.0")),
+            |_, destination, _| {
+                fs::create_dir(root.as_ref().join(destination))
+                    .map_err(|error| error.to_string())?;
+                Ok(())
+            },
+        )
+        .unwrap();
 
         assert_eq!(binary.path, installed.to_string_lossy());
         assert!(installed.is_file());
